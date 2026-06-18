@@ -1,6 +1,6 @@
 # runorm
 
-Sparse **PFlog1pPF / shifted-CLR** normalization for single-cell count data — a Rust library and
+Sparse **PFlog / shifted-CLR** normalization for single-cell count data — a Rust library and
 CLI. Part of the cleartools ecosystem ([`ruanndata`](https://github.com/pachterlab/ruanndata),
 [`rupca`](https://github.com/pachterlab/rupca), [`scclr`](https://github.com/cleartools/scclr)).
 
@@ -19,9 +19,22 @@ the dense value `data[i,j] − row_center[i]`. This is exactly
 ## Choosing K
 
 `K` controls variance stabilization. `runorm` can estimate it from the data: it fits the
-negative-binomial overdispersion `Var ≈ μ + α·μ²` across genes (closed-form OLS, no optimizer) and
-sets `K = 4·α·s` (`s` = mean depth) — the variance-stabilizing choice from the paper. See
-[`PfTarget`]: `MeanDepth` (default), `MedianDepth`, `Fixed(K)`, `Alpha(α)`, `EstimateAlpha`.
+negative-binomial overdispersion `Var ≈ μ + α·μ²` across genes (closed-form OLS, no optimizer) —
+the variance-stabilizing choice from the paper. See [`PfTarget`]: `MeanDepth` (default),
+`MedianDepth`, `Fixed(K)`, `Alpha(α)`, `EstimateAlpha`.
+
+The `Alpha`/`EstimateAlpha` targets give **PFlog**: the centered log-ratio of the raw counts
+shifted by a uniform pseudocount `1/(4·α)`,
+
+```
+PFlog(x) = center(log(x + 1/(4·α))) = clr(x + 1/(4·α))
+```
+
+where `α` is the negative-binomial overdispersion. Equivalently the per-cell PF target
+`K_i = 4·α·s_i` gives a constant row scale `4·α`; to keep the matrix sparse `runorm` computes the
+identical `center(log1p(4·α·x))` (the two forms differ only by the per-cell-constant `log(4·α)`,
+which cancels in the centering). The depth targets (`MeanDepth`/`MedianDepth`/`Fixed`) keep the
+classic PF scale `K / s_i`.
 
 ## Library
 

@@ -1,6 +1,6 @@
 //! # runorm
 //!
-//! Sparse **PFlog1pPF** / **shifted-CLR** normalization for single-cell count data.
+//! Sparse **PFlog** / **shifted-CLR** normalization for single-cell count data.
 //!
 //! The transform (per cell / row `i`), following the reference in the supplementary note:
 //!
@@ -117,16 +117,21 @@ fn validate_csr(
 /// Strategy for choosing the PF target `K`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum PfTarget {
-    /// `K` = mean cell depth across cells. Standard PFlog1pPF.
+    /// `K` = mean cell depth across cells (classic PF to mean depth).
     MeanDepth,
     /// `K` = median cell depth (robust to depth outliers).
     MedianDepth,
     /// `K` given directly (e.g. `1e4`, Seurat-style). Pseudocount `c = 1/K` on the
     /// depth-normalized scale.
     Fixed(f64),
-    /// `K = 4·alpha·s` with a user-supplied overdispersion `alpha` (`s` = mean depth).
+    /// **PFlog** with a user-supplied overdispersion `alpha`: the centered log-ratio of the raw
+    /// counts shifted by a uniform pseudocount `1/(4·alpha)`, `center(log(x + 1/(4·alpha)))`.
+    /// Equivalently the per-cell PF target `K_i = 4·alpha·s_i` gives a constant row scale `4·alpha`;
+    /// to keep the matrix sparse this is computed as the identical `center(log1p(4·alpha·x))` (the
+    /// two forms differ only by the per-cell-constant `log(4·alpha)`, which cancels in the
+    /// centering). The reported `k = 4·alpha·mean_depth` is for provenance only.
     Alpha(f64),
-    /// Estimate `alpha` from the data (`Var ≈ μ + alpha·μ²`), then `K = 4·alpha·s`.
+    /// **PFlog** with `alpha` estimated from the data (`Var ≈ μ + alpha·μ²`); see [`PfTarget::Alpha`].
     EstimateAlpha,
 }
 
@@ -373,7 +378,7 @@ fn split_by_lengths<'a, T>(mut buf: &'a mut [T], lens: &[usize]) -> Vec<&'a mut 
     out
 }
 
-/// Compute the PFlog1pPF / shifted-CLR normalization. Returns the sparse result and a report of
+/// Compute the PFlog / shifted-CLR normalization. Returns the sparse result and a report of
 /// the chosen PF target.
 pub fn normalize_csr(c: &CsrCounts, p: &NormParams) -> Result<(ShiftedClrMatrix, NormReport)> {
     c.validate()?;
@@ -384,6 +389,13 @@ pub fn normalize_csr(c: &CsrCounts, p: &NormParams) -> Result<(ShiftedClrMatrix,
     let depths = row_depths(c);
     let report = resolve_k(c, &depths, &p.target)?;
     let k = report.k;
+    // PFlog: an alpha-based target is the centered log-ratio of the raw counts shifted by a
+    // uniform pseudocount 1/(4*alpha), center(log(x + 1/(4*alpha))). The per-cell PF target
+    // K_i = 4*alpha*s_i gives a constant row scale 4*alpha (the depth cancels); we compute the
+    // sparsity-preserving log1p(4*alpha*x) here, which differs from log(x + 1/(4*alpha)) only by
+    // the per-cell-constant log(4*alpha) that cancels under centering. Depth targets
+    // (mean/median/fixed) keep the classic PF scale K / s_i.
+    let alpha_scale = report.alpha.map(|alpha| 4.0 * alpha);
     let n_cols_f = c.n_cols as f64;
     let apply_log = p.log1p;
     let apply_center = p.center;
@@ -420,7 +432,7 @@ pub fn normalize_csr(c: &CsrCounts, p: &NormParams) -> Result<(ShiftedClrMatrix,
                     continue;
                 }
 
-                let scale = k / depth;
+                let scale = alpha_scale.unwrap_or_else(|| k / depth);
                 let mut rowsum = 0.0_f64; // f64 accumulation regardless of any future storage dtype
                 for (off, p_idx) in (start..end).enumerate() {
                     let scaled = c.data[p_idx] * scale;
@@ -444,9 +456,12 @@ pub fn normalize_csr(c: &CsrCounts, p: &NormParams) -> Result<(ShiftedClrMatrix,
     Ok((out, report))
 }
 
-/// Convenience: PFlog1pPF / shifted-CLR with default parameters (PF to mean depth, log1p, center).
-pub fn pflog1ppf(c: &CsrCounts) -> Result<ShiftedClrMatrix> {
-    Ok(normalize_csr(c, &NormParams::default())?.0)
+/// Convenience: **PFlog** — estimate the overdispersion `alpha` from the data and apply the
+/// centered log-ratio of the counts shifted by `1/(4·alpha)`, `center(log(x + 1/(4·alpha)))`
+/// (computed as the equivalent sparsity-preserving `center(log1p(4·alpha·x))`).
+pub fn pflog(c: &CsrCounts) -> Result<ShiftedClrMatrix> {
+    let params = NormParams { target: PfTarget::EstimateAlpha, log1p: true, center: true };
+    Ok(normalize_csr(c, &params)?.0)
 }
 
 #[cfg(test)]
@@ -466,7 +481,7 @@ mod tests {
         .unwrap()
     }
 
-    /// Independent dense PFlog1pPF oracle.
+    /// Independent dense depth-target (PF) oracle (scale `k / depth`).
     fn dense_oracle(c: &CsrCounts, k: f64, log1p: bool, center: bool) -> Vec<f64> {
         let d = c.n_cols;
         let mut dense = vec![0.0_f64; c.n_rows * d];
@@ -522,6 +537,23 @@ mod tests {
             let oracle = dense_oracle(&c, k, params.log1p, params.center);
             for (a, b) in m.densify().iter().zip(oracle.iter()) {
                 assert!((a - b).abs() < 1e-12, "{a} vs {b}");
+            }
+        }
+    }
+
+    #[test]
+    fn alpha_target_is_pflog_constant_scale() {
+        // PFlog: an alpha target uses a constant row scale 4*alpha (the cell depth cancels), so
+        // the stored (uncentered) value for a count x is log1p(4*alpha*x), regardless of depth.
+        let c = sample();
+        let alpha = 0.5;
+        let params = NormParams { target: PfTarget::Alpha(alpha), log1p: true, center: false };
+        let (m, report) = normalize_csr(&c, &params).unwrap();
+        assert_eq!(report.alpha, Some(alpha));
+        for i in 0..c.n_rows {
+            for p in m.indptr[i]..m.indptr[i + 1] {
+                let expected = (4.0 * alpha * c.data[p]).ln_1p();
+                assert!((m.data[p] - expected).abs() < 1e-12, "{} vs {}", m.data[p], expected);
             }
         }
     }

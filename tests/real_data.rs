@@ -1,11 +1,11 @@
 //! Real-data tests on a PBMC 3k subset (genuine 10x counts: 400 cells x 800 genes, see
-//! `tests/data/pbmc_subset.mtx`). Validates PFlog1pPF on real single-cell data against an
+//! `tests/data/pbmc_subset.mtx`). Validates PFlog on real single-cell data against an
 //! independent dense oracle and checks that overdispersion estimation is sane.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use runorm::{estimate_overdispersion, normalize_csr, CsrCounts, NormParams, PfTarget};
+use runorm::{estimate_overdispersion, normalize_csr, CsrCounts, NormParams, NormReport, PfTarget};
 
 fn fixture() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/pbmc_subset.mtx")
@@ -47,15 +47,20 @@ fn load_mtx(path: &Path) -> CsrCounts {
     CsrCounts::new(n_rows, n_cols, data, indices, indptr).unwrap()
 }
 
-/// Independent dense PFlog1pPF oracle.
-fn dense_oracle(c: &CsrCounts, k: f64) -> Vec<f64> {
+/// Independent dense PFlog / shifted-CLR oracle.
+fn dense_oracle(c: &CsrCounts, report: &NormReport) -> Vec<f64> {
     let d = c.n_cols;
     let mut out = vec![0f64; c.n_rows * d];
+    // PFlog (alpha target): the per-cell PF target K_i = 4*alpha*s_i makes the row scale
+    // 4*alpha constant (depth cancels) -> log1p(4*alpha*x) on raw counts. Depth targets keep
+    // the classic PF scale K / s_i.
+    let alpha_scale = report.alpha.map(|a| 4.0 * a);
     for i in 0..c.n_rows {
         let s: f64 = c.data[c.indptr[i]..c.indptr[i + 1]].iter().sum();
+        let scale = alpha_scale.unwrap_or(report.k / s);
         let mut row = vec![0f64; d];
         for p in c.indptr[i]..c.indptr[i + 1] {
-            row[c.indices[p]] = (c.data[p] * k / s).ln_1p();
+            row[c.indices[p]] = (c.data[p] * scale).ln_1p();
         }
         let m = row.iter().sum::<f64>() / d as f64;
         for j in 0..d {
@@ -66,18 +71,18 @@ fn dense_oracle(c: &CsrCounts, k: f64) -> Vec<f64> {
 }
 
 #[test]
-fn pflog1ppf_matches_dense_oracle_on_pbmc() {
+fn pflog_matches_dense_oracle_on_pbmc() {
     let counts = load_mtx(&fixture());
     assert_eq!((counts.n_rows, counts.n_cols), (400, 800));
 
     for params in [
         NormParams::default(), // PF to mean depth
-        NormParams { target: PfTarget::EstimateAlpha, log1p: true, center: true },
+        NormParams { target: PfTarget::EstimateAlpha, log1p: true, center: true }, // PFlog
     ] {
         let (m, report) = normalize_csr(&counts, &params).unwrap();
         assert!(report.k > 0.0 && report.k.is_finite());
 
-        let oracle = dense_oracle(&counts, report.k);
+        let oracle = dense_oracle(&counts, &report);
         let got = m.densify();
         let max_err = got
             .iter()

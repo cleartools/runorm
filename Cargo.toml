@@ -2,7 +2,7 @@
 name = "runorm"
 version = "0.1.0"
 edition = "2021"
-description = "Sparse PFlog1pPF / shifted-CLR normalization for single-cell count data"
+description = "Sparse PFlog / shifted-CLR normalization for single-cell count data"
 license = "BSD-2-Clause"
 
 [lib]
@@ -32,8 +32,7 @@ clap = { version = "4.5", features = ["derive"], optional = true }
 
 [dev-dependencies]
 # Used by the end-to-end normalize -> PCA parity test.
-# TODO: switch to the default branch once pachterlab/rupca#1 merges.
-rupca = { git = "https://github.com/pachterlab/rupca", branch = "fix-dsapps-restart-convergence" }
+rupca = { git = "https://github.com/pachterlab/rupca" }
 # Used by the CLI integration test (build fixtures + temp files).
 ruanndata = { git = "https://github.com/pachterlab/ruanndata", default-features = false }
 tempfile = "3"

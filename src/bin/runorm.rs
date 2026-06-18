@@ -1,4 +1,4 @@
-//! `runorm` command-line tool: PFlog1pPF / shifted-CLR normalization over ruanndata containers.
+//! `runorm` command-line tool: PFlog / shifted-CLR normalization over ruanndata containers.
 
 use std::error::Error;
 use std::path::{Path, PathBuf};
@@ -14,7 +14,7 @@ use runorm::{
 #[command(
     name = "runorm",
     version,
-    about = "Sparse PFlog1pPF / shifted-CLR normalization for single-cell count data"
+    about = "Sparse PFlog / shifted-CLR normalization for single-cell count data"
 )]
 struct Cli {
     #[command(subcommand)]
